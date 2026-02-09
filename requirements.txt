@@ -1,0 +1,10 @@
+# CDK Dependencies
+aws-cdk-lib>=2.170.0
+constructs>=10.0.0
+
+# Lambda Dependencies (also in lambda/requirements.txt)
+boto3>=1.35.0
+
+# Development / Testing
+pytest>=8.0.0
+moto>=5.0.0

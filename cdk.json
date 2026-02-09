@@ -1,0 +1,25 @@
+{
+  "app": "python -m infrastructure.app",
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "requirements*.txt",
+      "**/__pycache__",
+      "**/*.pyc",
+      "cdk.out",
+      ".git",
+      ".venv",
+      "reports"
+    ]
+  },
+  "context": {
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/core:stackRelativeExports": true,
+    "schedule_expression": "rate(24 hours)",
+    "report_retention_days": 90,
+    "environment": "production"
+  }
+}
