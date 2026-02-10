@@ -202,15 +202,61 @@ When a recommended type is not in the allow-list, Bedrock selects alternatives b
 
 ---
 
+## Prerequisites
+
+### Tools Required
+
+| Tool | Purpose | Install |
+|------|---------|---------|
+| **Python 3.12+** | Runtime for Lambdas and CDK | [python.org](https://www.python.org/downloads/) |
+| **AWS CLI** | AWS credentials and configuration | `pip install awscli` or [AWS docs](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) |
+| **AWS CDK CLI** | Infrastructure deployment | `npm install -g aws-cdk` |
+| **Node.js** | Required by CDK CLI | [nodejs.org](https://nodejs.org/) |
+
+### AWS Services That Must Be Enabled
+
+| Service | Action Required |
+|---------|-----------------|
+| **AWS Compute Optimizer** | Must be **opted in** in the target account via the AWS Console. Recommendations take ~14 days to generate after opt-in. |
+| **Amazon Bedrock** | Must **enable model access** for your chosen model (Claude or Nova) in the target region via the Bedrock console under *Model access*. |
+
+### Lambda Environment Variables
+
+**All environment variables are set automatically by CDK** — you do NOT need to set them manually. CDK wires them from the stack resources.
+
+#### Part 1 Lambda (`finops-compute-optimizer-report`)
+
+| Variable | Required | Default | Set By |
+|----------|----------|---------|--------|
+| `REPORT_BUCKET` | **Yes** | — | CDK (auto from S3 bucket) |
+| `REPORT_PREFIX` | No | `reports` | CDK |
+| `ACCOUNT_IDS` | No | `""` (current account only) | CDK (from context) |
+| `AWS_REGION` | No | Lambda runtime default | AWS Lambda |
+
+#### Part 2 Lambda (`finops-bedrock-validator`)
+
+| Variable | Required | Default | Set By |
+|----------|----------|---------|--------|
+| `REPORT_BUCKET` | No | Falls back to S3 event bucket | CDK (auto from S3 bucket) |
+| `REPORT_PREFIX` | No | `reports` | CDK |
+| `BEDROCK_MODEL_ID` | No | `claude` | CDK (from context) |
+| `BEDROCK_REGION` | No | `us-east-1` | CDK (from context) |
+
+### CDK Context Parameters
+
+These are the only values you might want to customize at deploy time:
+
+| Parameter | Default | How to Set |
+|-----------|---------|------------|
+| `schedule_expression` | `rate(24 hours)` | `cdk.json` or `--context schedule_expression="rate(7 days)"` |
+| `report_retention_days` | `90` | `cdk.json` or `--context report_retention_days=180` |
+| `account_ids` | `""` | `--context account_ids="111111111111,222222222222"` |
+| `bedrock_model_id` | `claude` | `--context bedrock_model_id="nova"` |
+| `bedrock_region` | `us-east-1` | `--context bedrock_region="us-west-2"` |
+
+---
+
 ## Deployment
-
-### Prerequisites
-
-- Python 3.12+
-- AWS CLI configured (`aws configure`)
-- AWS CDK CLI (`npm install -g aws-cdk`)
-- AWS Compute Optimizer **enabled** in the target account
-- Amazon Bedrock **model access enabled** for Claude or Nova in the target region
 
 ### Step 1: Clone and Set Up
 
