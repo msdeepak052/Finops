@@ -376,6 +376,165 @@ Instances with **any** of these tags are excluded from Part 1 reports:
 
 ---
 
+## Code Flow Hierarchy
+
+Detailed execution order showing each file called and what it does.
+
+### Part 1: Compute Optimizer Pipeline
+
+```
+EventBridge (daily cron)
+  │
+  ▼
+part1/handler.py → handler(event, context)
+  │
+  │  Step 1: Fetch recommendations
+  ├──▶ part1/compute_optimizer/optimizer_client.py → ComputeOptimizerClient
+  │      Calls Compute Optimizer API with pagination to get all EC2
+  │      recommendations. Supports multi-account via account_ids list.
+  │
+  │  Step 2: Enrich with tags
+  ├──▶ part1/compute_optimizer/ec2_tags.py → EC2TagFetcher
+  │      Calls EC2 DescribeInstances to fetch tags for each instance.
+  │      Extracts the "Name" tag as instance_name.
+  │
+  │  Step 3: Filter EKS instances
+  ├──▶ part1/compute_optimizer/eks_filter.py → EKSFilter
+  │      Checks tags for kubernetes.io/*, eks:cluster-name, k8s.io/* etc.
+  │      Returns two lists: (non_eks, eks_excluded).
+  │
+  │  Step 4: Enrich with pricing
+  ├──▶ part1/compute_optimizer/cost_calculator.py → CostCalculator
+  │      Calls AWS Pricing API (us-east-1 endpoint) for On-Demand prices.
+  │      Caches results. Adds hourly/monthly prices + savings per instance.
+  │
+  │  Step 5: Generate and upload reports
+  └──▶ part1/compute_optimizer/report_builder.py → ReportBuilder
+         build_csv()  → CSV string with 22 columns
+         build_json() → JSON with metadata + recommendations array
+         upload_to_s3() → PUT to s3://{bucket}/reports/{timestamp}/
+           ├── ec2_optimization_report.csv
+           └── ec2_optimization_report.json  ◄── triggers Part 2
+```
+
+### Part 2: Bedrock AI Validation
+
+```
+S3 Event Notification (.json suffix in reports/ prefix)
+  │
+  ▼
+part2/handler.py → handler(event, context)
+  │
+  │  Guard clauses:
+  │    - Skip non-.json files → return 200
+  │    - Skip /validated/ paths → return 200 (prevents re-trigger loop)
+  │
+  │  Step 1: Read Part 1 report from S3
+  ├──▶ part2/bedrock_validator/s3_reader.py → S3ReportReader
+  │      parse_s3_event() → extracts bucket + key from S3 event, URL-decodes key
+  │      read_report()    → downloads JSON from S3, returns recommendations list
+  │
+  │  Step 2: Load allow-list + init Bedrock client
+  ├──▶ part2/bedrock_validator/allowlist_checker.py → AllowListChecker
+  │      load() → reads part2/allowlist.yaml, builds _type_to_tier dict
+  │               mapping each "family.size" → {tier_name, discount_percent, category}
+  │
+  ├──▶ part2/bedrock_validator/bedrock_client.py → BedrockClient
+  │      __init__() → resolves model alias ("claude"→full ID, "nova"→full ID)
+  │                    creates bedrock-runtime client for Converse API
+  │
+  │  Step 3: Validate each recommendation
+  └──▶ part2/bedrock_validator/recommendation_enricher.py → RecommendationEnricher
+         enrich_all(recommendations) → loops through each recommendation:
+           │
+           │  For EACH recommendation:
+           │
+           ├── allowlist_checker.is_allowed(recommended_type)?
+           │     │
+           │     ├── YES → _approve_allowed()
+           │     │           Sets validation_status = "Approved (Allowed Instance)"
+           │     │           Looks up discount tier (50% or 35%)
+           │     │           Calculates discounted_monthly_price and savings
+           │     │           No Bedrock call needed
+           │     │
+           │     └── NO → _validate_with_bedrock()
+           │               │
+           │               ├──▶ part2/bedrock_validator/prompt_builder.py → PromptBuilder
+           │               │      build_validation_prompt() → returns (system_prompt, user_prompt)
+           │               │        - system_prompt: "You are an AWS EC2 expert, respond JSON only"
+           │               │        - user_prompt: current instance details, CO recommendation,
+           │               │          full allow-list table, selection criteria (price > CPU >
+           │               │          memory > storage > network), 20% headroom rule
+           │               │
+           │               ├──▶ part2/bedrock_validator/bedrock_client.py → BedrockClient
+           │               │      invoke(system_prompt, user_prompt)
+           │               │        - Calls Bedrock Converse API (model-agnostic)
+           │               │        - Extracts text from response content blocks
+           │               │        - _parse_json_response() strips markdown fences if present
+           │               │        - Returns parsed dict: {alternatives[], analysis_summary, confidence}
+           │               │
+           │               ├── Uses top-ranked alternative as final_recommendation
+           │               │   Sets validation_status = "AI-Recommended Alternative"
+           │               │   Looks up discount tier for the AI-picked type
+           │               │   Formats all alternatives as readable string
+           │               │
+           │               └── On exception → graceful degradation
+           │                   Sets validation_status = "AI Validation Failed"
+           │                   Falls back to original CO recommendation
+           │                   Continues processing remaining instances
+           │
+         Returns enriched list with new fields:
+           validation_status, final_recommendation, discount_tier_name,
+           discount_percent, discounted_monthly_price,
+           estimated_monthly_savings_with_discount, ai_alternatives,
+           ai_analysis_summary, ai_confidence, bedrock_model
+
+  │  Step 4: Generate and upload enriched reports
+  └──▶ part2/bedrock_validator/report_builder.py → EnrichedReportBuilder
+         build_csv()  → CSV string with 19 enriched columns
+         build_json() → JSON with validation_summary metadata + enriched records
+         upload_to_s3() → PUT to s3://{bucket}/reports/{timestamp}/validated/
+           ├── ec2_validated_report.csv
+           └── ec2_validated_report.json  (has /validated/ in path → won't re-trigger)
+         save_local()  → writes to /tmp for Lambda debugging
+```
+
+### CDK Infrastructure (deploy-time)
+
+```
+cdk synth / cdk deploy
+  │
+  ▼
+cdk.json → "app": "python -m infrastructure.app"
+  │
+  ▼
+infrastructure/app.py → main()
+  │  Reads context: schedule, retention, account_ids, bedrock_model_id, bedrock_region
+  │
+  └──▶ infrastructure/stack.py → FinOpsComputeOptimizerStack
+         Creates:
+           1. S3 Bucket (encrypted, versioned, lifecycle rules)
+           2. Part 1: Log Group + IAM Role + Lambda (code from part1/) + EventBridge Rule
+           3. Part 2: Log Group + IAM Role + Lambda (code from part2/) + S3 Event Notification
+              └── S3 notification filter: prefix="reports/", suffix=".json" → Part 2 Lambda
+```
+
+### The Trigger Chain
+
+```
+EventBridge (daily)
+    → Part 1 Lambda runs
+        → uploads .json to S3 at reports/{ts}/ec2_optimization_report.json
+            → S3 event fires (matches prefix=reports/, suffix=.json)
+                → Part 2 Lambda runs
+                    → reads the .json, validates with allow-list + Bedrock
+                        → uploads to reports/{ts}/validated/ec2_validated_report.json
+                            → S3 event fires again BUT handler sees /validated/ in path
+                                → guard clause returns early (no infinite loop)
+```
+
+---
+
 ## Teardown
 
 ```bash
