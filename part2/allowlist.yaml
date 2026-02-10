@@ -1,0 +1,62 @@
+# ================================================================
+# Approved Instance Type Allow-List
+# ================================================================
+# Instance types pre-approved by the organization with negotiated
+# discount tiers (e.g., Reserved Instances, Savings Plans).
+#
+# Tier 1: 50% discount — high-volume, long-term commitments
+# Tier 2: 35% discount — standard commitments
+#
+# Recommendations matching these types are auto-approved.
+# Non-matching recommendations trigger Bedrock AI validation
+# to find the best alternative from this list.
+# ================================================================
+
+tiers:
+  - name: "Tier 1 — Enterprise Reserved"
+    discount_percent: 50
+    families:
+      # General Purpose
+      - family: m5
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+      - family: m6i
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+      - family: m6g
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+      # Compute Optimized
+      - family: c5
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 9xlarge, 12xlarge]
+      - family: c6i
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+      - family: c6g
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+      # Memory Optimized
+      - family: r5
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+      - family: r6i
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+
+  - name: "Tier 2 — Standard Reserved"
+    discount_percent: 35
+    families:
+      # General Purpose (newer gen)
+      - family: m7i
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+      - family: m7g
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+      # Compute Optimized (newer gen)
+      - family: c7i
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+      # Memory Optimized
+      - family: r7i
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+      - family: r6g
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge, 12xlarge]
+      # Storage Optimized
+      - family: i3
+        sizes: [large, xlarge, 2xlarge, 4xlarge, 8xlarge]
+      # Burstable
+      - family: t3
+        sizes: [micro, small, medium, large, xlarge, 2xlarge]
+      - family: t3a
+        sizes: [micro, small, medium, large, xlarge, 2xlarge]

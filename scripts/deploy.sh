@@ -2,9 +2,13 @@
 # ================================================================
 # FinOps Compute Optimizer — Deployment Script (Linux/macOS)
 # ================================================================
+# Deploys both Part 1 (Compute Optimizer pipeline) and
+# Part 2 (Bedrock AI validation) as a single CDK stack.
+#
 # Usage:
 #   ./scripts/deploy.sh                              # Deploy with defaults
 #   ./scripts/deploy.sh --account-ids "111,222"      # Multi-account
+#   ./scripts/deploy.sh --bedrock-model "nova"        # Use Amazon Nova
 #   ./scripts/deploy.sh --destroy                    # Tear down stack
 #   ./scripts/deploy.sh --synth-only                 # Synth only
 # ================================================================
@@ -13,6 +17,8 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ACCOUNT_IDS=""
+BEDROCK_MODEL="claude"
+BEDROCK_REGION="us-east-1"
 DESTROY=false
 SYNTH_ONLY=false
 
@@ -20,6 +26,8 @@ SYNTH_ONLY=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --account-ids) ACCOUNT_IDS="$2"; shift 2 ;;
+        --bedrock-model) BEDROCK_MODEL="$2"; shift 2 ;;
+        --bedrock-region) BEDROCK_REGION="$2"; shift 2 ;;
         --destroy) DESTROY=true; shift ;;
         --synth-only) SYNTH_ONLY=true; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -28,6 +36,8 @@ done
 
 echo "========================================"
 echo " FinOps Compute Optimizer — Deploy"
+echo " Part 1: Compute Optimizer Pipeline"
+echo " Part 2: Bedrock AI Validation"
 echo "========================================"
 
 # ── Step 1: Check prerequisites ──────────────────────────────────
@@ -74,6 +84,8 @@ CDK_ARGS=()
 if [ -n "$ACCOUNT_IDS" ]; then
     CDK_ARGS+=(--context "account_ids=${ACCOUNT_IDS}")
 fi
+CDK_ARGS+=(--context "bedrock_model_id=${BEDROCK_MODEL}")
+CDK_ARGS+=(--context "bedrock_region=${BEDROCK_REGION}")
 
 cd "$PROJECT_ROOT"
 cdk synth "${CDK_ARGS[@]}"
@@ -94,6 +106,9 @@ else
     echo -e "\n========================================"
     echo " Deployment complete!"
     echo "========================================"
-    echo -e "\nTo invoke manually:"
+    echo -e "\nLambda functions deployed:"
+    echo "  Part 1: finops-compute-optimizer-report  (EventBridge daily trigger)"
+    echo "  Part 2: finops-bedrock-validator          (S3 event trigger)"
+    echo -e "\nTo invoke Part 1 manually:"
     echo "  aws lambda invoke --function-name finops-compute-optimizer-report /dev/stdout"
 fi

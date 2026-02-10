@@ -1,52 +1,78 @@
 # FinOps EC2 Cost Optimization Report
 
-Automated AWS solution that analyzes EC2 instances using **AWS Compute Optimizer**, filters out **EKS/Kubernetes workloads**, and generates detailed cost + performance reports in CSV and JSON.
+Automated AWS solution that analyzes EC2 instances using **AWS Compute Optimizer**, filters out **EKS/Kubernetes workloads**, generates detailed cost reports, and validates recommendations against an organization's **approved instance type allow-list** using **Amazon Bedrock AI**.
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                         AWS Account                              │
-│                                                                  │
-│  ┌─────────────┐    ┌──────────────────────────────────────┐    │
-│  │ EventBridge  │───▶│         Lambda Function              │    │
-│  │ (Daily Rule) │    │   finops-compute-optimizer-report    │    │
-│  └─────────────┘    │                                      │    │
-│                      │  ┌────────────────────────────────┐  │    │
-│                      │  │ Step 1: Compute Optimizer API  │  │    │
-│                      │  │   → Fetch EC2 recommendations  │  │    │
-│                      │  └──────────────┬─────────────────┘  │    │
-│                      │                 ▼                     │    │
-│                      │  ┌────────────────────────────────┐  │    │
-│                      │  │ Step 2: EC2 DescribeInstances  │  │    │
-│                      │  │   → Fetch tags + instance names│  │    │
-│                      │  └──────────────┬─────────────────┘  │    │
-│                      │                 ▼                     │    │
-│                      │  ┌────────────────────────────────┐  │    │
-│                      │  │ Step 3: EKS Filter             │  │    │
-│                      │  │   → Exclude k8s-tagged nodes   │  │    │
-│                      │  └──────────────┬─────────────────┘  │    │
-│                      │                 ▼                     │    │
-│                      │  ┌────────────────────────────────┐  │    │
-│                      │  │ Step 4: Pricing API            │  │    │
-│                      │  │   → On-Demand prices + savings │  │    │
-│                      │  └──────────────┬─────────────────┘  │    │
-│                      │                 ▼                     │    │
-│                      │  ┌────────────────────────────────┐  │    │
-│                      │  │ Step 5: Report Builder         │  │    │
-│                      │  │   → CSV + JSON generation      │  │    │
-│                      │  └──────────────┬─────────────────┘  │    │
-│                      └─────────────────┼────────────────────┘    │
-│                                        ▼                         │
-│                      ┌──────────────────────────────────────┐    │
-│                      │           S3 Bucket                   │    │
-│                      │  reports/2025-01-15_12-00-00/          │    │
-│                      │    ├── ec2_optimization_report.csv     │    │
-│                      │    └── ec2_optimization_report.json    │    │
-│                      └──────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│                            AWS Account                                │
+│                                                                       │
+│  ┌─────────────┐    ┌─────────────────────────────────────────┐      │
+│  │ EventBridge  │───▶│   Part 1 Lambda                        │      │
+│  │ (Daily Rule) │    │   finops-compute-optimizer-report       │      │
+│  └─────────────┘    │                                         │      │
+│                      │  Step 1: Compute Optimizer API          │      │
+│                      │  Step 2: EC2 DescribeInstances (tags)   │      │
+│                      │  Step 3: EKS Filter                     │      │
+│                      │  Step 4: Pricing API                    │      │
+│                      │  Step 5: Report Builder (CSV + JSON)    │      │
+│                      └──────────────┬──────────────────────────┘      │
+│                                     ▼                                  │
+│                      ┌──────────────────────────────────────────┐     │
+│                      │              S3 Bucket                    │     │
+│                      │  reports/{timestamp}/                     │     │
+│                      │    ├── ec2_optimization_report.csv        │     │
+│                      │    ├── ec2_optimization_report.json ──────┼──┐  │
+│                      │    └── validated/                         │  │  │
+│                      │          ├── ec2_validated_report.csv     │  │  │
+│                      │          └── ec2_validated_report.json    │  │  │
+│                      └──────────────────────────────────────────┘  │  │
+│                                                                    │  │
+│                      ┌─────────────────────────────────────────┐   │  │
+│                      │   Part 2 Lambda                         │◀──┘  │
+│                      │   finops-bedrock-validator               │     │
+│                      │   (S3 event trigger on .json upload)     │     │
+│                      │                                         │      │
+│                      │  Step 1: Read Part 1 JSON report        │      │
+│                      │  Step 2: Load allow-list + init Bedrock │      │
+│                      │  Step 3: Validate recommendations       │      │
+│                      │    ├── In allow-list? → Auto-approve    │      │
+│                      │    └── Not in list?  → Bedrock AI pick  │      │
+│                      │  Step 4: Generate enriched reports      │      │
+│                      └─────────────────────────────────────────┘      │
+│                                     │                                  │
+│                      ┌──────────────▼───────────────────────────┐     │
+│                      │         Amazon Bedrock                    │     │
+│                      │  Claude / Nova (Converse API)             │     │
+│                      └──────────────────────────────────────────┘     │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow
+
+```
+EventBridge (daily) → Part 1 Lambda → S3 (JSON + CSV)
+                                         │
+                                    S3 Event (.json suffix)
+                                         │
+                                         ▼
+                                    Part 2 Lambda
+                                         │
+                              ┌──────────┴──────────┐
+                              │                     │
+                         In allow-list?         NOT in allow-list?
+                              │                     │
+                     Approve as-is           Bedrock AI selects
+                     + discount tier         alternatives from
+                                             allow-list (ranked)
+                              │                     │
+                              └──────────┬──────────┘
+                                         │
+                                   Enriched output
+                                   (CSV + JSON → S3)
 ```
 
 ### Services Involved
@@ -56,77 +82,12 @@ Automated AWS solution that analyzes EC2 instances using **AWS Compute Optimizer
 | **AWS Compute Optimizer** | Source of EC2 right-sizing recommendations |
 | **Amazon EC2** | Tag retrieval for instance identification and EKS filtering |
 | **AWS Pricing API** | On-Demand pricing for current and recommended instance types |
-| **AWS Lambda** | Serverless compute to run the analysis pipeline |
-| **Amazon S3** | Encrypted storage for generated reports |
-| **Amazon EventBridge** | Daily scheduled trigger |
-| **AWS CloudWatch Logs** | Lambda execution logs |
+| **Amazon Bedrock** | AI-based validation and alternative selection (Claude / Nova) |
+| **AWS Lambda** | Serverless compute (Part 1 + Part 2) |
+| **Amazon S3** | Encrypted storage for reports + event trigger |
+| **Amazon EventBridge** | Daily scheduled trigger for Part 1 |
+| **AWS CloudWatch Logs** | Lambda execution logs (both parts) |
 | **AWS IAM** | Least-privilege access control |
-
-### Data Flow
-
-1. **EventBridge** triggers Lambda on a daily schedule (configurable)
-2. Lambda calls **Compute Optimizer** `GetEC2InstanceRecommendations` with pagination
-3. For each recommended instance, Lambda calls **EC2** `DescribeInstances` to fetch tags
-4. **EKS Filter** removes instances tagged with `kubernetes.io/cluster/*` or `eks:cluster-name`
-5. **Pricing API** enriches remaining instances with On-Demand hourly/monthly costs
-6. **Report Builder** generates CSV + JSON and uploads to **S3** (SSE encrypted)
-
----
-
-## IAM Permissions (Least Privilege)
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "ComputeOptimizerReadOnly",
-      "Effect": "Allow",
-      "Action": [
-        "compute-optimizer:GetEC2InstanceRecommendations",
-        "compute-optimizer:GetEnrollmentStatus",
-        "compute-optimizer:GetRecommendationSummaries"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "EC2DescribeOnly",
-      "Effect": "Allow",
-      "Action": [
-        "ec2:DescribeInstances",
-        "ec2:DescribeTags"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "PricingReadOnly",
-      "Effect": "Allow",
-      "Action": [
-        "pricing:GetProducts",
-        "pricing:DescribeServices"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "S3ReportWrite",
-      "Effect": "Allow",
-      "Action": [
-        "s3:PutObject"
-      ],
-      "Resource": "arn:aws:s3:::REPORT_BUCKET/*"
-    },
-    {
-      "Sid": "CloudWatchLogs",
-      "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ],
-      "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/finops-compute-optimizer:*"
-    }
-  ]
-}
-```
 
 ---
 
@@ -134,13 +95,13 @@ Automated AWS solution that analyzes EC2 instances using **AWS Compute Optimizer
 
 ```
 myFinopsProject/
-├── cdk.json                          # CDK configuration
+├── cdk.json                          # CDK configuration (includes Bedrock defaults)
 ├── requirements.txt                  # CDK + dev dependencies
 ├── infrastructure/
 │   ├── __init__.py
 │   ├── app.py                        # CDK app entry point
-│   └── stack.py                      # CDK stack (Lambda, S3, EventBridge, IAM)
-├── lambda/
+│   └── stack.py                      # CDK stack (both Lambdas, S3, EventBridge, IAM)
+├── part1/                            # Part 1: Compute Optimizer pipeline
 │   ├── __init__.py
 │   ├── handler.py                    # Lambda entry point (orchestrator)
 │   ├── requirements.txt              # Lambda runtime dependencies
@@ -152,9 +113,30 @@ myFinopsProject/
 │   │   ├── cost_calculator.py        # Pricing API + cost calculations
 │   │   └── report_builder.py         # CSV/JSON report generator + S3 upload
 │   └── tests/
-│       ├── __init__.py
+│       ├── conftest.py
 │       ├── test_eks_filter.py
 │       └── test_report_builder.py
+├── part2/                            # Part 2: Bedrock AI validation
+│   ├── __init__.py
+│   ├── handler.py                    # Lambda entry point (S3 event trigger)
+│   ├── allowlist.yaml                # Approved instance types (Tier 1/2 discounts)
+│   ├── requirements.txt              # Lambda runtime dependencies
+│   ├── bedrock_validator/
+│   │   ├── __init__.py
+│   │   ├── s3_reader.py              # Parse S3 event + read Part 1 JSON
+│   │   ├── allowlist_checker.py      # Load YAML, check/query allow-list
+│   │   ├── bedrock_client.py         # Bedrock Converse API (Claude + Nova)
+│   │   ├── prompt_builder.py         # Structured prompt engineering
+│   │   ├── recommendation_enricher.py # Orchestrate validation pipeline
+│   │   └── report_builder.py         # Enriched CSV/JSON + S3 upload
+│   └── tests/
+│       ├── conftest.py
+│       ├── test_allowlist_checker.py
+│       ├── test_bedrock_client.py
+│       ├── test_prompt_builder.py
+│       ├── test_recommendation_enricher.py
+│       ├── test_report_builder.py
+│       └── test_handler.py
 ├── scripts/
 │   ├── deploy.sh                     # Linux/macOS deployment
 │   └── deploy.ps1                    # Windows PowerShell deployment
@@ -163,14 +145,72 @@ myFinopsProject/
 
 ---
 
-## Deployment — End-to-End Steps
+## Part 1: Compute Optimizer Pipeline
+
+1. **EventBridge** triggers Lambda on a daily schedule
+2. Lambda calls **Compute Optimizer** `GetEC2InstanceRecommendations` with pagination
+3. For each instance, fetches **EC2 tags** for identification
+4. **EKS Filter** removes instances tagged with Kubernetes markers
+5. **Pricing API** enriches with On-Demand hourly/monthly costs
+6. **Report Builder** generates CSV + JSON and uploads to **S3** (SSE encrypted)
+
+---
+
+## Part 2: Bedrock AI Validation
+
+1. **S3 event notification** triggers Part 2 Lambda when Part 1 uploads a `.json` report
+2. Lambda reads the Part 1 JSON report from S3
+3. For each recommendation:
+   - If the recommended type is in the **allow-list** → auto-approve with discount tier
+   - If NOT in the allow-list → query **Amazon Bedrock** (Claude or Nova) for alternatives
+   - If Bedrock fails → graceful degradation, continue with the batch
+4. Generates **enriched CSV + JSON** reports uploaded to `validated/` subfolder
+
+### Allow-List
+
+The allow-list (`part2/allowlist.yaml`) defines approved instance types in two tiers:
+
+| Tier | Discount | Families |
+|------|----------|----------|
+| **Tier 1** (Enterprise Reserved) | 50% | m5, m6i, m6g, c5, c6i, c6g, r5, r6i |
+| **Tier 2** (Standard Reserved) | 35% | m7i, m7g, c7i, r7i, r6g, i3, t3, t3a |
+
+### Bedrock AI Selection Criteria
+
+When a recommended type is not in the allow-list, Bedrock selects alternatives based on:
+1. **Price** — closest to or lower than the recommended type
+2. **vCPU count** — meets or exceeds the recommendation
+3. **Memory** — meets or exceeds the recommendation
+4. **20% headroom rule** — prefers types with ~20% more capacity
+5. **Higher discount tiers preferred** — Tier 1 over Tier 2 when specs are comparable
+
+---
+
+## IAM Permissions (Least Privilege)
+
+### Part 1 Lambda Role
+- `compute-optimizer:GetEC2InstanceRecommendations`, `GetEnrollmentStatus`, `GetRecommendationSummaries`
+- `ec2:DescribeInstances`, `ec2:DescribeTags`
+- `pricing:GetProducts`, `pricing:DescribeServices`
+- `s3:PutObject` (report bucket only)
+- `logs:CreateLogStream`, `logs:PutLogEvents`
+
+### Part 2 Lambda Role
+- `s3:GetObject`, `s3:PutObject` (report bucket only)
+- `bedrock:InvokeModel`, `bedrock:Converse`
+- `logs:CreateLogStream`, `logs:PutLogEvents`
+
+---
+
+## Deployment
 
 ### Prerequisites
 
 - Python 3.12+
 - AWS CLI configured (`aws configure`)
 - AWS CDK CLI (`npm install -g aws-cdk`)
-- AWS Compute Optimizer **already enabled** in the target account
+- AWS Compute Optimizer **enabled** in the target account
+- Amazon Bedrock **model access enabled** for Claude or Nova in the target region
 
 ### Step 1: Clone and Set Up
 
@@ -192,109 +232,42 @@ pip install -r requirements.txt
 ### Step 2: Bootstrap CDK (One-Time)
 
 ```bash
-# Get your account ID and region
 aws sts get-caller-identity --query Account --output text
 aws configure get region
 
-# Bootstrap CDK
 cdk bootstrap aws://ACCOUNT_ID/REGION
 ```
 
-### Step 3: Synthesize (Preview)
+### Step 3: Deploy
 
 ```bash
-# Generate CloudFormation template without deploying
-cdk synth
-```
-
-Review the template in `cdk.out/FinOpsComputeOptimizerStack.template.json`.
-
-### Step 4: Deploy
-
-```bash
-# Deploy the stack
+# Deploy with defaults (Claude model, us-east-1)
 cdk deploy
+
+# Or with custom Bedrock model
+cdk deploy --context bedrock_model_id="nova" --context bedrock_region="us-west-2"
 
 # Or with multi-account support
 cdk deploy --context account_ids="111111111111,222222222222"
 
-# Or use the automated script (does all of the above)
+# Or use the automated scripts
 ./scripts/deploy.sh                              # Linux/macOS
 .\scripts\deploy.ps1                             # Windows
 ```
 
-### Step 5: Verify
+### Step 4: Verify
 
 ```bash
-# Check the stack
-aws cloudformation describe-stacks \
-  --stack-name FinOpsComputeOptimizerStack \
-  --query "Stacks[0].StackStatus"
-
-# Manually invoke to test
+# Manually invoke Part 1
 aws lambda invoke \
   --function-name finops-compute-optimizer-report \
   --payload '{}' \
   response.json
 
 cat response.json
+
+# Part 2 triggers automatically when Part 1 uploads JSON to S3
 ```
-
-### Step 6: View Reports
-
-```bash
-# List generated reports
-BUCKET=$(aws cloudformation describe-stacks \
-  --stack-name FinOpsComputeOptimizerStack \
-  --query "Stacks[0].Outputs[?OutputKey=='ReportBucket'].OutputValue" \
-  --output text)
-
-aws s3 ls s3://$BUCKET/reports/ --recursive
-
-# Download latest report
-aws s3 cp s3://$BUCKET/reports/LATEST_FOLDER/ec2_optimization_report.csv .
-```
-
----
-
-## Report Columns
-
-| Column | Description |
-|--------|-------------|
-| Account ID | AWS account the instance belongs to |
-| Instance ID | EC2 instance ID (i-xxx) |
-| Instance Name | Value of the `Name` tag |
-| Finding | OVER_PROVISIONED, UNDER_PROVISIONED, or OPTIMIZED |
-| Finding Reasons | All finding reason codes |
-| CPU Finding Reasons | CPU-specific reasons |
-| Memory Finding Reasons | Memory-specific reasons |
-| Recommendation Instance State | State of the recommended action |
-| Current Instance Type | Currently running instance type |
-| Recommended Instance Type | Compute Optimizer's recommended type |
-| Current Performance Risk | Risk level for current configuration |
-| Current Hourly Price (USD) | On-Demand hourly rate for current type |
-| Recommended Hourly Price (USD) | On-Demand hourly rate for recommended type |
-| Current Monthly On-Demand Price | Monthly cost at On-Demand rates |
-| Recommended Monthly On-Demand Price | Monthly cost for recommended type |
-| Monthly Price Difference | Savings = current - recommended |
-| Est. Monthly Savings On-Demand | Compute Optimizer's estimated savings |
-| Est. Monthly Savings After Discounts | Savings accounting for RIs/Savings Plans |
-| Savings Opportunity (%) | Percentage savings available |
-| Migration Effort | Estimated effort to migrate (VeryLow/Low/Medium/High) |
-
----
-
-## EKS Exclusion Tags
-
-Instances with **any** of these tags are excluded from the report:
-
-| Tag Key | Example |
-|---------|---------|
-| `eks:cluster-name` | `eks:cluster-name = my-cluster` |
-| `eks:nodegroup-name` | `eks:nodegroup-name = ng-1` |
-| `aws:eks:cluster-name` | `aws:eks:cluster-name = prod` |
-| `kubernetes.io/cluster/<name>` | `kubernetes.io/cluster/my-cluster = owned` |
-| `k8s.io/cluster/<name>` | `k8s.io/cluster/dev = shared` |
 
 ---
 
@@ -306,25 +279,54 @@ Edit `cdk.json` context values or pass via CLI:
 |-----------|---------|-------------|
 | `schedule_expression` | `rate(24 hours)` | EventBridge schedule |
 | `report_retention_days` | `90` | S3 lifecycle expiration |
-| `account_ids` | `""` | Comma-separated account IDs for multi-account |
-
-```bash
-# Custom schedule (weekly)
-cdk deploy --context schedule_expression="rate(7 days)"
-
-# Custom retention
-cdk deploy --context report_retention_days=180
-```
+| `account_ids` | `""` | Comma-separated account IDs |
+| `bedrock_model_id` | `"claude"` | Bedrock model (`claude`, `nova`, or full ID) |
+| `bedrock_region` | `"us-east-1"` | AWS region for Bedrock endpoint |
 
 ---
 
-## Assumptions
+## Report Columns
 
-1. **Compute Optimizer is enabled** in the target AWS account(s)
-2. Instances have been running long enough for Compute Optimizer to generate recommendations (typically 14+ days)
-3. The Pricing API is used for On-Demand rates — actual costs may differ if RIs or Savings Plans are active
-4. Lambda timeout of 10 minutes is sufficient for the instance count; for 10,000+ instances, consider Step Functions
-5. The solution runs in a single region per deployment; deploy multiple stacks for multi-region
+### Part 1 Report (ec2_optimization_report.csv)
+
+| Column | Description |
+|--------|-------------|
+| Account ID | AWS account |
+| Instance ID | EC2 instance ID |
+| Instance Name | `Name` tag value |
+| Finding | OVER_PROVISIONED, UNDER_PROVISIONED, or OPTIMIZED |
+| Current/Recommended Instance Type | Instance types |
+| Current/Recommended Monthly Price | On-Demand monthly costs |
+| Est. Monthly Savings | On-Demand and after-discount savings |
+
+### Part 2 Report (ec2_validated_report.csv)
+
+| Column | Description |
+|--------|-------------|
+| Validation Status | Approved (Allowed Instance) / AI-Recommended Alternative / AI Validation Failed |
+| Final Recommendation | The validated instance type |
+| Discount Tier | Tier 1 or Tier 2 name |
+| Discount (%) | 50% or 35% |
+| Discounted Monthly Price | Price after applying tier discount |
+| Est. Savings With Discount | Savings vs current price after discount |
+| AI Confidence | high / medium / low |
+| AI Analysis | Summary of the AI's reasoning |
+| AI Alternatives | Ranked list of alternatives |
+| Bedrock Model | Model ID used for validation |
+
+---
+
+## EKS Exclusion Tags
+
+Instances with **any** of these tags are excluded from Part 1 reports:
+
+| Tag Key | Example |
+|---------|---------|
+| `eks:cluster-name` | `eks:cluster-name = my-cluster` |
+| `eks:nodegroup-name` | `eks:nodegroup-name = ng-1` |
+| `aws:eks:cluster-name` | `aws:eks:cluster-name = prod` |
+| `kubernetes.io/cluster/<name>` | `kubernetes.io/cluster/my-cluster = owned` |
+| `k8s.io/cluster/<name>` | `k8s.io/cluster/dev = shared` |
 
 ---
 

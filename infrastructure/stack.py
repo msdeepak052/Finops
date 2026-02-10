@@ -2,18 +2,18 @@
 AWS CDK Stack — EC2 Cost Optimization Report Infrastructure
 
 Deploys:
-  - S3 bucket for report storage (encrypted, lifecycle-managed)
-  - Lambda function running the analysis pipeline
-  - IAM role with least-privilege permissions
-  - EventBridge rule for scheduled execution (daily)
-  - CloudWatch log group with retention
+  Part 1: Compute Optimizer analysis pipeline
+    - S3 bucket for report storage (encrypted, lifecycle-managed)
+    - Lambda function running the analysis pipeline
+    - IAM role with least-privilege permissions
+    - EventBridge rule for scheduled execution (daily)
+    - CloudWatch log group with retention
 
-Why CDK over raw Boto3 for infrastructure?
-  - Declarative: infrastructure is version-controlled and repeatable
-  - Drift detection: CDK tracks actual vs desired state
-  - IAM synthesis: CDK auto-generates least-privilege policies
-  - Multi-account: CDK supports cross-account deployments natively
-  - Rollback: CloudFormation provides automatic rollback on failure
+  Part 2: Bedrock AI recommendation validation
+    - Lambda function for AI-based validation
+    - IAM role with Bedrock + S3 read/write permissions
+    - S3 event notification to trigger on Part 1 JSON uploads
+    - CloudWatch log group with retention
 """
 
 from aws_cdk import (
@@ -27,6 +27,7 @@ from aws_cdk import (
     aws_lambda as _lambda,
     aws_logs as logs,
     aws_s3 as s3,
+    aws_s3_notifications as s3n,
 )
 from constructs import Construct
 
@@ -41,6 +42,8 @@ class FinOpsComputeOptimizerStack(Stack):
         schedule_expression: str = "rate(24 hours)",
         report_retention_days: int = 90,
         account_ids: list[str] | None = None,
+        bedrock_model_id: str = "claude",
+        bedrock_region: str = "us-east-1",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -64,8 +67,12 @@ class FinOpsComputeOptimizerStack(Stack):
             ],
         )
 
-        # ── CloudWatch Log Group ────────────────────────────────────
-        log_group = logs.LogGroup(
+        # ================================================================
+        # Part 1: Compute Optimizer Analysis Pipeline
+        # ================================================================
+
+        # ── Part 1 CloudWatch Log Group ──────────────────────────────
+        part1_log_group = logs.LogGroup(
             self,
             "LambdaLogGroup",
             log_group_name="/aws/lambda/finops-compute-optimizer",
@@ -73,16 +80,16 @@ class FinOpsComputeOptimizerStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # ── IAM Role for Lambda (Least Privilege) ───────────────────
-        lambda_role = iam.Role(
+        # ── Part 1 IAM Role (Least Privilege) ────────────────────────
+        part1_role = iam.Role(
             self,
             "LambdaExecutionRole",
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-            description="Role for FinOps Compute Optimizer Lambda",
+            description="Role for FinOps Compute Optimizer Lambda (Part 1)",
         )
 
         # CloudWatch Logs — write only
-        lambda_role.add_to_policy(
+        part1_role.add_to_policy(
             iam.PolicyStatement(
                 sid="CloudWatchLogs",
                 effect=iam.Effect.ALLOW,
@@ -90,12 +97,12 @@ class FinOpsComputeOptimizerStack(Stack):
                     "logs:CreateLogStream",
                     "logs:PutLogEvents",
                 ],
-                resources=[log_group.log_group_arn, f"{log_group.log_group_arn}:*"],
+                resources=[part1_log_group.log_group_arn, f"{part1_log_group.log_group_arn}:*"],
             )
         )
 
         # Compute Optimizer — read-only EC2 recommendations
-        lambda_role.add_to_policy(
+        part1_role.add_to_policy(
             iam.PolicyStatement(
                 sid="ComputeOptimizerReadOnly",
                 effect=iam.Effect.ALLOW,
@@ -109,7 +116,7 @@ class FinOpsComputeOptimizerStack(Stack):
         )
 
         # EC2 — describe instances and tags only
-        lambda_role.add_to_policy(
+        part1_role.add_to_policy(
             iam.PolicyStatement(
                 sid="EC2DescribeOnly",
                 effect=iam.Effect.ALLOW,
@@ -122,7 +129,7 @@ class FinOpsComputeOptimizerStack(Stack):
         )
 
         # Pricing API — read-only
-        lambda_role.add_to_policy(
+        part1_role.add_to_policy(
             iam.PolicyStatement(
                 sid="PricingReadOnly",
                 effect=iam.Effect.ALLOW,
@@ -135,7 +142,7 @@ class FinOpsComputeOptimizerStack(Stack):
         )
 
         # S3 — write to report bucket only
-        lambda_role.add_to_policy(
+        part1_role.add_to_policy(
             iam.PolicyStatement(
                 sid="S3ReportWrite",
                 effect=iam.Effect.ALLOW,
@@ -147,17 +154,17 @@ class FinOpsComputeOptimizerStack(Stack):
             )
         )
 
-        # ── Lambda Function ─────────────────────────────────────────
+        # ── Part 1 Lambda Function ───────────────────────────────────
         account_ids_csv = ",".join(account_ids) if account_ids else ""
 
-        lambda_fn = _lambda.Function(
+        part1_lambda = _lambda.Function(
             self,
             "ComputeOptimizerLambda",
             function_name="finops-compute-optimizer-report",
             runtime=_lambda.Runtime.PYTHON_3_12,
             handler="handler.handler",
-            code=_lambda.Code.from_asset("lambda"),
-            role=lambda_role,
+            code=_lambda.Code.from_asset("part1"),
+            role=part1_role,
             timeout=Duration.minutes(10),
             memory_size=512,
             environment={
@@ -166,10 +173,10 @@ class FinOpsComputeOptimizerStack(Stack):
                 "ACCOUNT_IDS": account_ids_csv,
                 "POWERTOOLS_SERVICE_NAME": "finops-compute-optimizer",
             },
-            log_group=log_group,
+            log_group=part1_log_group,
         )
 
-        # ── EventBridge Schedule (Daily Trigger) ────────────────────
+        # ── EventBridge Schedule (Daily Trigger) ─────────────────────
         rule = events.Rule(
             self,
             "DailySchedule",
@@ -178,9 +185,101 @@ class FinOpsComputeOptimizerStack(Stack):
             schedule=events.Schedule.expression(schedule_expression),
             enabled=True,
         )
-        rule.add_target(targets.LambdaFunction(lambda_fn))
+        rule.add_target(targets.LambdaFunction(part1_lambda))
 
-        # ── Tags ────────────────────────────────────────────────────
+        # ================================================================
+        # Part 2: Bedrock AI Recommendation Validation
+        # ================================================================
+
+        # ── Part 2 CloudWatch Log Group ──────────────────────────────
+        part2_log_group = logs.LogGroup(
+            self,
+            "Part2LambdaLogGroup",
+            log_group_name="/aws/lambda/finops-bedrock-validator",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        # ── Part 2 IAM Role (Least Privilege) ────────────────────────
+        part2_role = iam.Role(
+            self,
+            "Part2LambdaExecutionRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            description="Role for FinOps Bedrock Validator Lambda (Part 2)",
+        )
+
+        # CloudWatch Logs — write only
+        part2_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="CloudWatchLogs",
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                ],
+                resources=[part2_log_group.log_group_arn, f"{part2_log_group.log_group_arn}:*"],
+            )
+        )
+
+        # S3 — read Part 1 reports + write validated reports
+        part2_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="S3ReportReadWrite",
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:PutObjectAcl",
+                ],
+                resources=[f"{report_bucket.bucket_arn}/*"],
+            )
+        )
+
+        # Bedrock — invoke model for AI validation
+        part2_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="BedrockInvoke",
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:Converse",
+                ],
+                resources=["*"],
+            )
+        )
+
+        # ── Part 2 Lambda Function ───────────────────────────────────
+        part2_lambda = _lambda.Function(
+            self,
+            "BedrockValidatorLambda",
+            function_name="finops-bedrock-validator",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=_lambda.Code.from_asset(
+                "part2",
+                exclude=["tests", "__pycache__", "*.pyc"],
+            ),
+            role=part2_role,
+            timeout=Duration.minutes(15),
+            memory_size=1024,
+            environment={
+                "REPORT_BUCKET": report_bucket.bucket_name,
+                "REPORT_PREFIX": "reports",
+                "BEDROCK_MODEL_ID": bedrock_model_id,
+                "BEDROCK_REGION": bedrock_region,
+                "POWERTOOLS_SERVICE_NAME": "finops-bedrock-validator",
+            },
+            log_group=part2_log_group,
+        )
+
+        # ── S3 Event Notification → Part 2 Lambda ────────────────────
+        report_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3n.LambdaDestination(part2_lambda),
+            s3.NotificationKeyFilter(prefix="reports/", suffix=".json"),
+        )
+
+        # ── Tags ─────────────────────────────────────────────────────
         Tags.of(self).add("Project", "FinOps")
         Tags.of(self).add("Component", "ComputeOptimizer")
         Tags.of(self).add("ManagedBy", "CDK")

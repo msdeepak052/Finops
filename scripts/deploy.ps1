@@ -1,14 +1,20 @@
 # ================================================================
 # FinOps Compute Optimizer — Deployment Script (Windows PowerShell)
 # ================================================================
+# Deploys both Part 1 (Compute Optimizer pipeline) and
+# Part 2 (Bedrock AI validation) as a single CDK stack.
+#
 # Usage:
-#   .\scripts\deploy.ps1                          # Deploy with defaults
-#   .\scripts\deploy.ps1 -AccountIds "111,222"    # Multi-account
-#   .\scripts\deploy.ps1 -Destroy                 # Tear down stack
+#   .\scripts\deploy.ps1                              # Deploy with defaults
+#   .\scripts\deploy.ps1 -AccountIds "111,222"        # Multi-account
+#   .\scripts\deploy.ps1 -BedrockModel "nova"          # Use Amazon Nova
+#   .\scripts\deploy.ps1 -Destroy                     # Tear down stack
 # ================================================================
 
 param(
     [string]$AccountIds = "",
+    [string]$BedrockModel = "claude",
+    [string]$BedrockRegion = "us-east-1",
     [switch]$Destroy = $false,
     [switch]$SynthOnly = $false
 )
@@ -18,6 +24,8 @@ $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Pa
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " FinOps Compute Optimizer — Deploy" -ForegroundColor Cyan
+Write-Host " Part 1: Compute Optimizer Pipeline" -ForegroundColor Cyan
+Write-Host " Part 2: Bedrock AI Validation" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
 # ── Step 1: Check prerequisites ──────────────────────────────────
@@ -76,6 +84,10 @@ if ($AccountIds) {
     $CdkArgs += "--context"
     $CdkArgs += "account_ids=$AccountIds"
 }
+$CdkArgs += "--context"
+$CdkArgs += "bedrock_model_id=$BedrockModel"
+$CdkArgs += "--context"
+$CdkArgs += "bedrock_region=$BedrockRegion"
 
 Push-Location $ProjectRoot
 cdk synth @CdkArgs
@@ -101,6 +113,9 @@ if ($Destroy) {
     Write-Host "`n========================================" -ForegroundColor Green
     Write-Host " Deployment complete!" -ForegroundColor Green
     Write-Host "========================================" -ForegroundColor Green
-    Write-Host "`nTo invoke manually:"
+    Write-Host "`nLambda functions deployed:"
+    Write-Host "  Part 1: finops-compute-optimizer-report  (EventBridge daily trigger)"
+    Write-Host "  Part 2: finops-bedrock-validator          (S3 event trigger)"
+    Write-Host "`nTo invoke Part 1 manually:"
     Write-Host "  aws lambda invoke --function-name finops-compute-optimizer-report /dev/stdout"
 }

@@ -2,8 +2,9 @@
 aws-cdk-lib>=2.170.0
 constructs>=10.0.0
 
-# Lambda Dependencies (also in lambda/requirements.txt)
+# Lambda Dependencies (also in part1/requirements.txt)
 boto3>=1.35.0
+pyyaml>=6.0
 
 # Development / Testing
 pytest>=8.0.0

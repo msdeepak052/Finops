@@ -20,6 +20,8 @@
     "@aws-cdk/core:stackRelativeExports": true,
     "schedule_expression": "rate(24 hours)",
     "report_retention_days": 90,
-    "environment": "production"
+    "environment": "production",
+    "bedrock_model_id": "claude",
+    "bedrock_region": "us-east-1"
   }
 }
