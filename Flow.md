@@ -1,27 +1,4 @@
-<div style="display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 200px 0 20px 0;">
-
-<div style="font-size: 24px; margin-bottom: 12px;"><strong>Amazon Q</strong></div>
-<div style="background: rgba(128, 128, 128, 0.15); border: 1px solid rgba(128, 128, 128, 0.25); border-radius: 8px; padding: 8px; margin: 4px 0; text-align: center;">
-<div style="font-size: 14px; margin-bottom: 4px;"><strong>Did you know?</strong></div>
-<div>Pinned context is always included in future chat messages</div>
-</div>
-
-Select code & ask me to explain, debug or optimize it, or type `/` for quick actions
-
-</div>
-
----
-
-Understand the above repo and let me know the code flow how it executes and what are the python files executed in the order with explanation
-
----
-
-I'll analyze the repository structure and explain the complete code execution flow.
-
----
-
-
-## Code Execution Flow - FinOps EC2 Cost Optimization Report
+# Code Execution Flow - FinOps EC2 Cost Optimization Report
 
 Based on the repository analysis, here's the complete execution flow:
 
